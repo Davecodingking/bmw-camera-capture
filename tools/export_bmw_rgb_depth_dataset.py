@@ -211,6 +211,7 @@ def write_camera_params(path, frames, width, height, fps, depth_min_m, depth_max
             "right": vec3(frame["right"]),
             "up": vec3(frame["up"]),
             "look": vec3(frame["look"]),
+            "camera_source": frame.get("camera_source", "csv"),
             "intrinsics": info,
             "root_param": int(frame.get("root_param", 0)),
             "draw_count": int(frame.get("draw_count", 0)),

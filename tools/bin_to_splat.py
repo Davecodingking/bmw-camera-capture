@@ -161,29 +161,19 @@ def unproject(row, base_dir, stride, min_d, max_d):
 
     pos = np.array([fget(row, "pos_x_m"), fget(row, "pos_y_m"), fget(row, "pos_z_m")])
 
-    use_igcs = row.get("igcs_ok", "") == "1" and row.get("igcs_fwd_x", "") != ""
     use_matrix = row.get("view_to_world_m00", "") != "" and row.get("proj_m00", "") != ""
-    if use_igcs:
-        # BEST path: engine-authoritative camera pushed by UUU via the IGCS connector.
-        # Deterministic (no CBV sniffing), correct for rotation AND translation.
-        # World = pos + depth * (forward + rx*right - ry*up). IGCS pos is in UE cm.
-        fov = math.radians(fget(row, "igcs_fov"))
-        fx = (w / 2.0) / math.tan(fov / 2.0); fy = fx
-        cx, cy = w / 2.0, h / 2.0
-        rx = (uu + PIXEL_CENTER_OFFSET - cx) / fx
-        ry = (vv + PIXEL_CENTER_OFFSET - cy) / fy
-        ipos = np.array([fget(row, "igcs_pos_x"), fget(row, "igcs_pos_y"), fget(row, "igcs_pos_z")]) * 0.01
-        R = normalize(np.array([fget(row, "igcs_right_x"), fget(row, "igcs_right_y"), fget(row, "igcs_right_z")]))
-        U = normalize(np.array([fget(row, "igcs_up_x"), fget(row, "igcs_up_y"), fget(row, "igcs_up_z")]))
-        F = normalize(np.array([fget(row, "igcs_fwd_x"), fget(row, "igcs_fwd_y"), fget(row, "igcs_fwd_z")]))
-        dirs = F[None, :] + R[None, :] * rx[:, None] - U[None, :] * ry[:, None]
-        pts = ipos[None, :] + d[:, None] * dirs
-    elif use_matrix:
-        # Matrix-based unprojection — correct for camera TRANSLATION and rotation
-        # (verified: consecutive translated frames overlap ~90%). Uses the recorded
-        # projection (p00/p11) + view_to_world (rotation-only) matrices, so it needs
-        # NO hfov/sign heuristics. World = (view ray * depth, rotated to world) minus
-        # the pos field, because UE stores pos as PreViewTranslation = -camera_origin.
+    if use_matrix:
+        # PREFERRED path: matrix-based unprojection from the recorded projection
+        # (p00/p11) + view_to_world (rotation-only) matrices. This is the game-agnostic
+        # ground truth — verified correct for rotation AND translation on Black Myth:
+        # Wukong and Clair Obscur: Expedition 33. World = (view ray * depth, rotated to
+        # world) minus the pos field, because UE stores pos as PreViewTranslation =
+        # -camera_origin. NO hfov/sign heuristics needed.
+        #
+        # NOTE: the IGCS engine camera (igcs_* columns) is deliberately NOT used for
+        # reconstruction — UUU's reported FOV/forward convention is per-game unreliable
+        # (it fanned Expedition 33 out of alignment even though capture was green). The
+        # igcs_* columns are still recorded and can be used to VALIDATE the sniffed pose.
         p00 = fget(row, "proj_m00"); p11 = fget(row, "proj_m11")
         V2W = np.array([[fget(row, f"view_to_world_m{i}{j}") for j in range(4)] for i in range(4)])
         vz = d

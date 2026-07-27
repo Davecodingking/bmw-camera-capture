@@ -2,6 +2,8 @@
 addon/build/
 *.addon64
 *.addon
+# ...but DO ship the prebuilt add-on so artists don't have to compile
+!prebuilt/BMWCameraCapture.addon64
 *.obj
 *.pdb
 *.ilk

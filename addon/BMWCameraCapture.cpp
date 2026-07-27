@@ -99,6 +99,16 @@ constexpr bool kFilterLikelyMainView = false;
 // CBVs under g_mutex — the code above warns this can destabilize D3D12 in this
 // title, and it is a likely contributor to mid-capture crashes. GTA keeps it off.
 constexpr bool kLogCameraCandidates = false;
+// CALIBRATION for a NEW game: dump the raw bytes of every constant buffer bound
+// on a captured frame to BMWCameraCapture/cbv_dumps/, so the camera-CBV offsets
+// (kProjectionOffset/kViewOriginOffset/kViewToWorldOffset) can be found offline
+// by scanning for the UE reversed-Z projection matrix. Candidate logging can't do
+// this because it re-parses with the OLD (game-specific) offsets and never matches
+// a different layout. Turn OFF for normal capture. Each unique (resource,offset)
+// is dumped once, capped at kDumpMaxFiles.
+constexpr bool kDumpRawCbvs = false;
+constexpr uint32_t kDumpMaxFiles = 80;
+constexpr uint64_t kDumpBytes = 0x1000;  // 4 KB per CBV: covers UE's view uniform buffer at any offset
 constexpr uint32_t kMaxCameraCandidateRowsPerFrame = 512;
 constexpr uint32_t kMaxCameraCandidateDrawScansPerFrame = 1024;
 constexpr float kMinMainViewUpZ = 0.7f;
@@ -239,8 +249,11 @@ std::filesystem::path g_color_dir;
 std::filesystem::path g_csv_path;
 std::filesystem::path g_candidate_csv_path;
 std::filesystem::path g_debug_path;
+std::filesystem::path g_cbv_dump_dir;
 
 std::mutex g_mutex;
+std::unordered_set<std::string> g_dumped_cbv_keys;   // (resource,offset) already dumped
+std::atomic<uint32_t> g_dumped_cbv_count = 0;
 std::unordered_map<api::command_list *, CommandListState> g_cmd_states;
 std::unordered_map<uint64_t, MappedBuffer> g_mapped_buffers;
 CameraSample g_latest_sample;
@@ -540,6 +553,7 @@ void init_paths()
 	g_csv_path = g_output_dir / L"bmw_camera_pos.csv";
 	g_candidate_csv_path = g_output_dir / L"bmw_camera_candidates.csv";
 	g_debug_path = g_output_dir / L"bmw_camera_capture_debug.log";
+	g_cbv_dump_dir = g_output_dir / L"cbv_dumps";
 
 	std::error_code ec;
 	std::filesystem::create_directories(g_depth_dir, ec);
@@ -699,6 +713,50 @@ bool try_read_from_device(api::device *device, const TrackedCBV &cbv, CameraSamp
 	const bool ok = parse_camera_from_bytes(static_cast<const uint8_t *>(mapped), sample);
 	device->unmap_buffer_region(cbv.buffer);
 	return ok;
+}
+
+// CALIBRATION: dump the raw bytes of one constant buffer to cbv_dumps/, once per
+// unique (resource,offset). Used to find a new game's camera-CBV offsets offline.
+void dump_cbv_raw(api::device *device, const TrackedCBV &cbv)
+{
+	if (g_dumped_cbv_count.load(std::memory_order_relaxed) >= kDumpMaxFiles)
+		return;
+
+	const std::string key = std::to_string(resource_key(cbv.buffer)) + "_" + std::to_string(cbv.offset);
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (g_dumped_cbv_keys.count(key))
+			return;
+	}
+
+	api::resource_desc desc = device->get_resource_desc(cbv.buffer);
+	if (desc.type != api::resource_type::buffer)
+		return;
+
+	uint64_t avail = (desc.buffer.size != 0 && desc.buffer.size > cbv.offset)
+		? (desc.buffer.size - cbv.offset) : kDumpBytes;
+	const uint64_t n = avail < kDumpBytes ? avail : kDumpBytes;
+	if (n < 0x100)   // too small to hold a UE view uniform buffer
+		return;
+
+	void *mapped = nullptr;
+	if (!device->map_buffer_region(cbv.buffer, cbv.offset, n, api::map_access::read_only, &mapped) || mapped == nullptr)
+		return;
+	std::vector<uint8_t> bytes(static_cast<const uint8_t *>(mapped), static_cast<const uint8_t *>(mapped) + n);
+	device->unmap_buffer_region(cbv.buffer);
+
+	std::error_code ec;
+	std::filesystem::create_directories(g_cbv_dump_dir, ec);
+	const std::filesystem::path out = g_cbv_dump_dir / (std::string("cbv_") + key + ".bin");
+	std::ofstream fp(out, std::ios::binary);
+	if (!fp)
+		return;
+	fp.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+	fp.close();
+
+	std::lock_guard<std::mutex> lock(g_mutex);
+	if (g_dumped_cbv_keys.insert(key).second)
+		g_dumped_cbv_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void publish_sample(const CameraSample &sample)
@@ -1560,6 +1618,8 @@ void scan_cbvs(api::command_list *cmd_list, uint32_t draw_count)
 			continue;
 		if (cbv.size != UINT64_MAX && cbv.size < kReadSize)
 			continue;
+		if (kDumpRawCbvs)
+			dump_cbv_raw(device, cbv);
 		if (log_candidates_this_draw)
 		{
 			std::lock_guard<std::mutex> lock(g_mutex);

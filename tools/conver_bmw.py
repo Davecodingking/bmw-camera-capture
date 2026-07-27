@@ -60,6 +60,12 @@ SCREEN_Y_UP_SIGN = -1.0
 # for projection math to avoid a small, consistent sub-pixel reprojection bias.
 PIXEL_CENTER_OFFSET = 0.5
 
+# Wrong-camera gate: if the CBV-sniffed forward and the IGCS engine-camera forward
+# differ by more than this many degrees, the sniff locked onto the wrong camera that
+# frame -> drop it. Good frames agree to <1 deg; wrong-camera frames diverge 15+ deg,
+# so there is a wide safe margin.
+WRONG_CAMERA_MAX_FWD_DEG = 3.0
+
 # When BMWCameraCapture writes bmw_camera_candidates.csv, a single frame can
 # contain many UE ViewUniform-shaped CBVs. The stable main camera is the pose
 # that appears most often in that frame, not necessarily the first CBV that the
@@ -274,6 +280,8 @@ def load_camera_csv(path):
     frames = []
     sync_dropped = 0
     parse_dropped = 0
+    igcs_used = 0
+    wrong_cam_dropped = 0
     for row in rows:
         try:
             strict_sync = row.get("strict_sync_ok", "").strip().lower()
@@ -350,7 +358,58 @@ def load_camera_csv(path):
                 # do not overlap when reprojected to world space.
                 "screen_x_sign": SCREEN_X_RIGHT_SIGN if is_gta else -1.0,
                 "screen_y_sign": SCREEN_Y_UP_SIGN if is_gta else 1.0,
+                "camera_source": "csv",
             })
+
+            # Use the MATRIX camera (recorded projection + view_to_world) for BMW/UE
+            # when those columns are present. This is the game-agnostic ground truth:
+            # verified correct for rotation AND translation on both Black Myth: Wukong
+            # and Clair Obscur: Expedition 33. It supersedes both (a) the old right/up/
+            # look + screen-sign method (which only aligns pure-rotation; it is a mirror
+            # image of the correct result so it fails under translation) and (b) the IGCS
+            # engine camera (which is per-game unreliable: UUU's reported FOV / forward
+            # convention did not match Expedition 33's actual render, giving fanned-out
+            # misalignment even at green light). The recorded matrices always match what
+            # the game rendered. We keep the existing sign formula and just bake the
+            # matrix-equivalent camera into it:
+            #   matrix:  World = -pos_m + d*(fwd + rx*R - ry*U)   [pos_m is UE PreViewTranslation = -origin]
+            #   formula: World =  pos   + d*(look + sx*rx*R + sy*ry*U)
+            #   => pos=-pos_m, look=+fwd, R,U unchanged, sx=+1, sy=-1.
+            # hfov_deg/vfov_deg already come from the projection matrix (addon computed
+            # them as 2*atan(1/p00) / 2*atan(1/p11)), so intrinsics need no change.
+            if (not is_gta
+                    and row.get("view_to_world_m00", "").strip() != ""
+                    and row.get("proj_m00", "").strip() != ""):
+                f = frames[-1]
+                f["pos"] = -pos                       # -PreViewTranslation = camera origin
+                f["look"] = normalize(fwd)            # +forward (view_to_world row 2), NOT negated
+                f["screen_x_sign"] = 1.0
+                f["screen_y_sign"] = -1.0
+                f["camera_source"] = "matrix"
+                igcs_used += 1
+
+                # WRONG-CAMERA GATE (this is what IGCS is FOR). The CBV sniff can lock
+                # onto a different camera on some frames — one at the SAME origin but a
+                # different orientation (e.g. a cubemap/reflection/shadow pass), so a
+                # position check misses it. The IGCS engine camera (UUU) gives the true
+                # main-camera orientation, so compare the sniffed forward against the
+                # IGCS forward: they agree to <1 deg on good frames and diverge 15-27 deg
+                # on wrong-camera frames (verified on Wukong: 5/18 frames were wrong).
+                # Such a frame's sniffed matrices are for the wrong camera, so the matrix
+                # reconstruction of it is garbage and there is no correct projection to
+                # fall back to -> DROP it. Only possible when IGCS is present; without it
+                # we cannot tell, so we keep the frame (degrades to trusting the sniff).
+                if row.get("igcs_ok", "").strip() == "1" and row.get("igcs_fwd_x", "").strip() != "":
+                    gf = np.array([parse_float(row, "igcs_fwd_x"),
+                                   parse_float(row, "igcs_fwd_y"),
+                                   parse_float(row, "igcs_fwd_z")], dtype=np.float64)
+                    sf = normalize(fwd)
+                    gfn = normalize(gf)
+                    ang = math.degrees(math.acos(max(-1.0, min(1.0, float(sf @ gfn)))))
+                    if ang > WRONG_CAMERA_MAX_FWD_DEG:
+                        frames.pop()
+                        igcs_used -= 1
+                        wrong_cam_dropped += 1
         except (KeyError, ValueError):
             parse_dropped += 1
             continue
@@ -365,6 +424,12 @@ def load_camera_csv(path):
               file=sys.stderr)
     if parse_dropped:
         print(f"warning: {path}: {parse_dropped} 行字段解析失败，已丢弃", file=sys.stderr)
+    if igcs_used:
+        print(f"camera: {igcs_used}/{len(frames)} 帧使用矩阵法重建(投影+view_to_world矩阵，"
+              f"旋转/平移通用)，其余回退符号法", file=sys.stderr)
+    if wrong_cam_dropped:
+        print(f"camera: 丢弃 {wrong_cam_dropped} 帧抓错相机(嗅探朝向与 IGCS 主相机差 "
+              f">{WRONG_CAMERA_MAX_FWD_DEG}°)", file=sys.stderr)
 
     return frames
 

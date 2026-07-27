@@ -117,17 +117,18 @@ ALIGN="$DIR/make_alignment.py"
 ST="$DIR/state_tool.py"          # 断点记录读写（段级 + 原子写）
 
 shopt -s nullglob
-caps=("$DATASET"/GTACameraCapture_*)
+caps=("$DATASET"/GTACameraCapture_* "$DATASET"/BMWCameraCapture_*)
 echo
-echo "扫描到 ${#caps[@]} 个数据集（GTACameraCapture_*）"
+echo "扫描到 ${#caps[@]} 个数据集（GTA/BMWCameraCapture_*）"
 done_cnt=0; skip_cnt=0; fail_cnt=0; miss_cnt=0; idx_cap=0; total_cap=${#caps[@]}
 for cap in "${caps[@]}"; do
   [ -d "$cap" ] || continue
   idx_cap=$((idx_cap+1))
   tag="$(basename "$cap")"
   CSV="$cap/gta_camera_pos.csv"
+  [ -f "$CSV" ] || CSV="$cap/bmw_camera_pos.csv"   # BMW 采集用 bmw_camera_pos.csv
   if [ ! -f "$CSV" ]; then
-    echo "[$tag] 没有 gta_camera_pos.csv，跳过"; continue
+    echo "[$tag] 没有 gta_camera_pos.csv / bmw_camera_pos.csv，跳过"; continue
   fi
   # 断点检查：整天已完成就跳过（exit 0=已完成）
   if "$PY" "$ST" is-day-done "$STATE" "$tag"; then
@@ -136,6 +137,7 @@ for cap in "${caps[@]}"; do
 
   echo "[$tag] (数据集 $idx_cap/$total_cap) 开始处理 ..."
   date_tag="${tag#GTACameraCapture_}"                 # GTACameraCapture_0702 -> 0702
+  date_tag="${date_tag#BMWCameraCapture_}"            # BMWCameraCapture_0702  -> 0702
   ok_all=1; outs=""; day_status="done"
   any_real_ok=0        # 本次运行有没有段真正产出数据（exit 0）
   missing_segs=""      # 整段缺 bin 的段（exit 4）：延后到收尾再决定 skip/保留
