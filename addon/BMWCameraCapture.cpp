@@ -135,6 +135,12 @@ struct CameraSample
 	api::format depth_format = api::format::unknown;
 	uint32_t depth_row_pitch = 0;
 	uint64_t depth_byte_size = 0;
+	// Diagnostics: whether the camera pass's OWN depth matched the color target
+	// (=1 trustworthy; =0 we fell back to the tracked global depth), and the
+	// camera-pass depth dimensions before any fallback.
+	bool cam_depth_ok = false;
+	uint32_t cam_pass_depth_width = 0;
+	uint32_t cam_pass_depth_height = 0;
 };
 
 struct DepthReadback
@@ -452,6 +458,7 @@ void write_csv_header(std::ofstream &fp)
 	fp << ",depth_file,depth_width,depth_height,depth_format,depth_row_pitch,depth_tight_row_pitch,depth_byte_size,depth_samples";
 	fp << ",color_file,color_width,color_height,color_format,color_row_pitch,color_tight_row_pitch,color_byte_size,color_samples";
 	fp << ",camera_frame,depth_frame,color_frame,strict_sync_ok,segment,seg_start,timestamp_s,timestamp_unix";
+	fp << ",cam_depth_ok,cam_pass_depth_w,cam_pass_depth_h";
 
 	fp << '\n';
 }
@@ -1742,6 +1749,12 @@ void on_reshade_begin_effects(api::effect_runtime *, api::command_list *cmd_list
 		const bool cam_depth_ok = sample.depth_resource.handle != 0 &&
 			color_w != 0 && sample.depth_width == color_w && sample.depth_height == color_h;
 
+		// Record diagnostics per frame (the cam-pass depth dims, captured BEFORE any
+		// fallback overwrites sample.depth_*).
+		sample.cam_depth_ok = cam_depth_ok;
+		sample.cam_pass_depth_width = sample.depth_width;
+		sample.cam_pass_depth_height = sample.depth_height;
+
 		if (!g_logged_depth_choice.exchange(true))
 		{
 			std::ostringstream ss;
@@ -1965,6 +1978,9 @@ void on_reshade_present(api::effect_runtime *runtime)
 				   << ',' << (g_segment_start_pending.exchange(false, std::memory_order_relaxed) ? 1 : 0)
 				   << ',' << qpc_seconds_since(g_capture_qpc_start.load(std::memory_order_relaxed))
 				   << ',' << wall_clock_unix_seconds()
+				   << ',' << (sample.cam_depth_ok ? 1 : 0)
+				   << ',' << sample.cam_pass_depth_width
+				   << ',' << sample.cam_pass_depth_height
 				   << '\n';
 				wrote_row = true;
 			}
