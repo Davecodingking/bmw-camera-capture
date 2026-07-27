@@ -1,0 +1,26 @@
+# Build artifacts
+addon/build/
+*.addon64
+*.addon
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Python
+__pycache__/
+*.pyc
+
+# Capture output / generated datasets / point clouds (large, not source)
+splat_out*/
+rgb_depth_dataset/
+*.ply
+*.bin
+*.mp4
+*.mkv
+*.csv
+*.log
+
+# Misc
+.DS_Store
