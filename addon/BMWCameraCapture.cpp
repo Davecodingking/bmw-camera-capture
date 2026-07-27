@@ -54,7 +54,11 @@ constexpr bool kFilterLikelyMainView = false;
 // Diagnostic path: dump every unique CBV that passes the camera-shape test on
 // sampled capture frames. This is intentionally separate from the main camera
 // CSV, so bad candidates can be inspected without changing the conversion path.
-constexpr bool kLogCameraCandidates = true;
+// Default OFF: only needed when first calibrating the camera CBV for a new game.
+// When on, every draw on a capture frame re-scans ALL CBVs and re-maps camera
+// CBVs under g_mutex — the code above warns this can destabilize D3D12 in this
+// title, and it is a likely contributor to mid-capture crashes. GTA keeps it off.
+constexpr bool kLogCameraCandidates = false;
 constexpr uint32_t kMaxCameraCandidateRowsPerFrame = 512;
 constexpr uint32_t kMaxCameraCandidateDrawScansPerFrame = 1024;
 constexpr float kMinMainViewUpZ = 0.7f;
