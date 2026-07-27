@@ -21,6 +21,46 @@
 #include <unordered_set>
 #include <vector>
 
+// --- IGCS camera-tools connector (engine-authoritative camera from UUU) ---------
+// UUU (an IGCS camera tool) hunts loaded modules for an add-on exporting
+// connectFromCameraTools()/getDataFromCameraToolsBuffer(); it then writes the
+// CameraToolsData struct into that buffer every frame. By exporting these two
+// functions we receive UUU's TRUE main-camera pose (no CBV sniffing / guessing).
+// Struct layout must match FransBouma/IgcsConnector src/CameraToolsData.h exactly.
+struct IgcsVec3 { float x, y, z; };
+struct IgcsVec4 { float x, y, z, w; };
+struct IgcsCameraToolsData
+{
+	uint8_t cameraEnabled;
+	uint8_t cameraMovementLocked;
+	uint8_t reserved1;
+	uint8_t reserved2;
+	float fov;
+	IgcsVec3 coordinates;
+	IgcsVec4 lookQuaternion;
+	IgcsVec3 rotationMatrixUpVector;
+	IgcsVec3 rotationMatrixRightVector;
+	IgcsVec3 rotationMatrixForwardVector;
+	float pitch;
+	float yaw;
+	float roll;
+};
+static LPBYTE g_igcs_camera_buffer = nullptr;   // 8KB buffer UUU writes into
+static std::atomic_bool g_igcs_connected = false;
+
+extern "C" __declspec(dllexport) bool connectFromCameraTools()
+{
+	if (g_igcs_camera_buffer == nullptr)
+		g_igcs_camera_buffer = static_cast<LPBYTE>(calloc(8 * 1024, 1));
+	g_igcs_connected = (g_igcs_camera_buffer != nullptr);
+	return g_igcs_connected;
+}
+
+extern "C" __declspec(dllexport) LPBYTE getDataFromCameraToolsBuffer()
+{
+	return g_igcs_camera_buffer;
+}
+
 namespace
 {
 namespace api = reshade::api;
@@ -228,6 +268,7 @@ std::atomic_bool g_logged_depth_target_miss = false;
 std::atomic_bool g_logged_depth_apply_miss = false;
 std::atomic_bool g_logged_depth_choice = false;
 std::atomic_bool g_logged_preview_unsupported = false;
+std::atomic_bool g_logged_igcs_connected = false;
 // REC indicator state: true when the last sampled frame produced no CSV row.
 std::atomic_bool g_rec_skipped = false;
 // Recording-segment tracking: bump the session id on each F8 start; the first CSV
@@ -459,6 +500,10 @@ void write_csv_header(std::ofstream &fp)
 	fp << ",color_file,color_width,color_height,color_format,color_row_pitch,color_tight_row_pitch,color_byte_size,color_samples";
 	fp << ",camera_frame,depth_frame,color_frame,strict_sync_ok,segment,seg_start,timestamp_s,timestamp_unix";
 	fp << ",cam_depth_ok,cam_pass_depth_w,cam_pass_depth_h";
+	// IGCS = engine-authoritative camera pushed by UUU (see connector above).
+	fp << ",igcs_ok,igcs_cam_enabled,igcs_fov,igcs_pos_x,igcs_pos_y,igcs_pos_z";
+	fp << ",igcs_qx,igcs_qy,igcs_qz,igcs_qw";
+	fp << ",igcs_up_x,igcs_up_y,igcs_up_z,igcs_right_x,igcs_right_y,igcs_right_z,igcs_fwd_x,igcs_fwd_y,igcs_fwd_z";
 
 	fp << '\n';
 }
@@ -1832,6 +1877,9 @@ void on_reshade_present(api::effect_runtime *runtime)
 	const uint64_t frame = g_frame_index.load(std::memory_order_relaxed);
 	bool wrote_row = false;   // for the REC indicator: did this sampled frame emit a CSV row?
 
+	if (g_igcs_connected.load(std::memory_order_relaxed) && !g_logged_igcs_connected.exchange(true))
+		log_line("BMWCameraCapture: IGCS camera tool (UUU) connected -- engine-authoritative camera available.");
+
 	if (runtime != nullptr && runtime->is_key_pressed(kToggleCaptureKey))
 	{
 		const bool enabled = !g_capture_enabled.load(std::memory_order_relaxed);
@@ -1980,7 +2028,20 @@ void on_reshade_present(api::effect_runtime *runtime)
 				   << ',' << wall_clock_unix_seconds()
 				   << ',' << (sample.cam_depth_ok ? 1 : 0)
 				   << ',' << sample.cam_pass_depth_width
-				   << ',' << sample.cam_pass_depth_height
+				   << ',' << sample.cam_pass_depth_height;
+
+				// Engine-authoritative camera from UUU via the IGCS connector buffer
+				// (zeroed if UUU hasn't connected / isn't running).
+				IgcsCameraToolsData ig{};
+				const bool ig_ok = g_igcs_camera_buffer != nullptr;
+				if (ig_ok)
+					ig = *reinterpret_cast<const IgcsCameraToolsData *>(g_igcs_camera_buffer);
+				fp << ',' << (ig_ok ? 1 : 0) << ',' << static_cast<int>(ig.cameraEnabled) << ',' << ig.fov
+				   << ',' << ig.coordinates.x << ',' << ig.coordinates.y << ',' << ig.coordinates.z
+				   << ',' << ig.lookQuaternion.x << ',' << ig.lookQuaternion.y << ',' << ig.lookQuaternion.z << ',' << ig.lookQuaternion.w
+				   << ',' << ig.rotationMatrixUpVector.x << ',' << ig.rotationMatrixUpVector.y << ',' << ig.rotationMatrixUpVector.z
+				   << ',' << ig.rotationMatrixRightVector.x << ',' << ig.rotationMatrixRightVector.y << ',' << ig.rotationMatrixRightVector.z
+				   << ',' << ig.rotationMatrixForwardVector.x << ',' << ig.rotationMatrixForwardVector.y << ',' << ig.rotationMatrixForwardVector.z
 				   << '\n';
 				wrote_row = true;
 			}
