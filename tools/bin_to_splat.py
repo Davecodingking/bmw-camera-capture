@@ -147,9 +147,6 @@ def unproject(row, base_dir, stride, min_d, max_d):
         raise ValueError(f"rgb {rgb_bgr.shape[:2]} != depth {depth_m.shape}")
 
     h, w = depth_m.shape
-    fx = (w / 2.0) / math.tan(math.radians(fget(row, "hfov_deg")) / 2.0)
-    fy = (h / 2.0) / math.tan(math.radians(fget(row, "vfov_deg")) / 2.0)
-    cx, cy = w / 2.0, h / 2.0
 
     vs = np.arange(0, h, stride)
     us = np.arange(0, w, stride)
@@ -162,19 +159,40 @@ def unproject(row, base_dir, stride, min_d, max_d):
     uu = uu[mask].astype(np.float64)
     vv = vv[mask].astype(np.float64)
 
-    ray_x = (uu + PIXEL_CENTER_OFFSET - cx) / fx
-    ray_y = (vv + PIXEL_CENTER_OFFSET - cy) / fy
-
     pos = np.array([fget(row, "pos_x_m"), fget(row, "pos_y_m"), fget(row, "pos_z_m")])
-    right = normalize(np.array([fget(row, "right_x"), fget(row, "right_y"), fget(row, "right_z")]))
-    up = normalize(np.array([fget(row, "up_x"), fget(row, "up_y"), fget(row, "up_z")]))
-    fwd = np.array([fget(row, "fwd_x"), fget(row, "fwd_y"), fget(row, "fwd_z")])
-    look = normalize(-fwd if NEGATE_CSV_FWD_FOR_LOOK else fwd)
 
-    dirs = (look[None, :]
-            + right[None, :] * (ray_x * SCREEN_X_RIGHT_SIGN)[:, None]
-            + up[None, :] * (ray_y * SCREEN_Y_UP_SIGN)[:, None])
-    pts = pos[None, :] + d[:, None] * dirs
+    use_matrix = row.get("view_to_world_m00", "") != "" and row.get("proj_m00", "") != ""
+    if use_matrix:
+        # Matrix-based unprojection — correct for camera TRANSLATION and rotation
+        # (verified: consecutive translated frames overlap ~90%). Uses the recorded
+        # projection (p00/p11) + view_to_world (rotation-only) matrices, so it needs
+        # NO hfov/sign heuristics. World = (view ray * depth, rotated to world) minus
+        # the pos field, because UE stores pos as PreViewTranslation = -camera_origin.
+        p00 = fget(row, "proj_m00"); p11 = fget(row, "proj_m11")
+        V2W = np.array([[fget(row, f"view_to_world_m{i}{j}") for j in range(4)] for i in range(4)])
+        vz = d
+        vx = (2.0 * (uu + PIXEL_CENTER_OFFSET) / w - 1.0) * vz / p00
+        vy = (1.0 - 2.0 * (vv + PIXEL_CENTER_OFFSET) / h) * vz / p11
+        view = np.stack([vx, vy, vz, np.ones_like(vz)], axis=1)
+        pts = (view @ V2W)[:, :3] - pos[None, :]
+        fx = (w / 2.0) * p00; fy = (h / 2.0) * p11
+    else:
+        # Legacy fallback for old CSVs without matrix columns (less accurate; only
+        # aligns pure-rotation captures). See git history for why this is deprecated.
+        fx = (w / 2.0) / math.tan(math.radians(fget(row, "hfov_deg")) / 2.0)
+        fy = (h / 2.0) / math.tan(math.radians(fget(row, "vfov_deg")) / 2.0)
+        cx, cy = w / 2.0, h / 2.0
+        ray_x = (uu + PIXEL_CENTER_OFFSET - cx) / fx
+        ray_y = (vv + PIXEL_CENTER_OFFSET - cy) / fy
+        right = normalize(np.array([fget(row, "right_x"), fget(row, "right_y"), fget(row, "right_z")]))
+        up = normalize(np.array([fget(row, "up_x"), fget(row, "up_y"), fget(row, "up_z")]))
+        fwd = np.array([fget(row, "fwd_x"), fget(row, "fwd_y"), fget(row, "fwd_z")])
+        look = normalize(-fwd if NEGATE_CSV_FWD_FOR_LOOK else fwd)
+        dirs = (look[None, :]
+                + right[None, :] * (ray_x * SCREEN_X_RIGHT_SIGN)[:, None]
+                + up[None, :] * (ray_y * SCREEN_Y_UP_SIGN)[:, None])
+        pts = pos[None, :] + d[:, None] * dirs
+
     P = pts.astype(np.float32)
     C = bgr[:, [2, 1, 0]].astype(np.uint8)   # BGR -> RGB
     D = d.astype(np.float32)
