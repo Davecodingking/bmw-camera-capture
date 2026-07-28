@@ -79,13 +79,18 @@ fi
 pyver="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
 echo "[env 1/3] Python: $PY ($pyver)"
 
-# ---- 2) ffmpeg（winget -> 已解压的 C:\ffmpeg -> curl 自动下载静态包；无 winget 也能用）----
+# ---- 2) ffmpeg（PATH -> winget 包目录 -> C:\ffmpeg -> curl 下载静态包）----
+# %LOCALAPPDATA% 在 Git Bash 里是 C:\... 反斜杠形式，find 处理不了 -> 用 cygpath 转成 /c/...，
+# 否则 winget 已装的 ffmpeg 也会被判为“不可用”。
+LAD_U="$LOCALAPPDATA"
+command -v cygpath >/dev/null 2>&1 && LAD_U="$(cygpath -u "$LOCALAPPDATA" 2>/dev/null || printf '%s' "$LOCALAPPDATA")"
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  FF="$(find /c/ffmpeg "$DIR/ffmpeg" -iname ffmpeg.exe 2>/dev/null | head -1)"
+  # 先在 winget 包目录 / C:\ffmpeg 里找（可能之前已装好，免得重复走 winget）
+  FF="$(find "$LAD_U/Microsoft/WinGet/Packages" /c/ffmpeg "$DIR/ffmpeg" -iname ffmpeg.exe 2>/dev/null | head -1)"
   if [ -z "${FF:-}" ] && command -v winget >/dev/null 2>&1; then
     echo "[env 2/3] winget 安装 ffmpeg ..."
     winget install -e --id Gyan.FFmpeg --silent --accept-source-agreements --accept-package-agreements || true
-    FF="$(find "$LOCALAPPDATA/Microsoft/WinGet/Packages" -iname ffmpeg.exe 2>/dev/null | head -1)"
+    FF="$(find "$LAD_U/Microsoft/WinGet/Packages" -iname ffmpeg.exe 2>/dev/null | head -1)"
   fi
   if [ -z "${FF:-}" ]; then
     echo "[env 2/3] 无 winget，自动下载静态 ffmpeg 到 C:\\ffmpeg ..."
