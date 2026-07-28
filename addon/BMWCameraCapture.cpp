@@ -267,6 +267,11 @@ std::unordered_set<std::string> g_frame_candidate_keys;
 api::command_queue *g_graphics_queue = nullptr;
 std::atomic<uint64_t> g_frame_index = 0;
 std::atomic_bool g_capture_enabled = kCaptureStartsEnabled;
+// Whether to also write viewable .bmp previews next to each .bin. Defaults to
+// kSavePreviewImages, but an artist can override it at runtime by putting a
+// "BMWCameraCapture.ini" next to the add-on with a line "save_bmp=0" (bin only)
+// or "save_bmp=1" (bin + bmp). Read once in init_paths().
+std::atomic_bool g_save_preview_images{kSavePreviewImages};
 std::atomic_bool g_logged_map_failure = false;
 std::atomic_bool g_logged_depth_failure = false;
 std::atomic_bool g_logged_color_failure = false;
@@ -555,9 +560,31 @@ void init_paths()
 	g_debug_path = g_output_dir / L"bmw_camera_capture_debug.log";
 	g_cbv_dump_dir = g_output_dir / L"cbv_dumps";
 
+	// Artist toggle: BMWCameraCapture.ini next to the add-on / game exe. A line
+	// "save_bmp=0" -> write only the .bin (no viewable .bmp); "save_bmp=1" -> both.
+	// No file / no such line -> keep the built-in default (kSavePreviewImages).
+	{
+		std::ifstream cfg(g_game_dir / L"BMWCameraCapture.ini");
+		std::string line;
+		while (cfg && std::getline(cfg, line))
+		{
+			line.erase(std::remove_if(line.begin(), line.end(),
+				[](unsigned char c) { return c == ' ' || c == '\t' || c == '\r'; }), line.end());
+			if (line.rfind("save_bmp=", 0) == 0)
+			{
+				const std::string v = line.substr(9);
+				g_save_preview_images.store(!(v == "0" || v == "false" || v == "off"), std::memory_order_relaxed);
+			}
+		}
+	}
+
 	std::error_code ec;
 	std::filesystem::create_directories(g_depth_dir, ec);
 	std::filesystem::create_directories(g_color_dir, ec);
+
+	log_line(g_save_preview_images.load(std::memory_order_relaxed)
+		? "BMWCameraCapture: preview .bmp = ON (writing .bin + .bmp). Set save_bmp=0 in BMWCameraCapture.ini for .bin only."
+		: "BMWCameraCapture: preview .bmp = OFF (writing .bin only, per BMWCameraCapture.ini save_bmp=0).");
 
 	const bool need_header = !std::filesystem::exists(g_csv_path) || std::filesystem::file_size(g_csv_path) == 0;
 	std::ofstream fp(g_csv_path, std::ios::app);
@@ -1209,7 +1236,7 @@ bool write_depth_readback(DepthReadback &readback, const std::string &postfix)
 	if (bin)
 		bin.write(static_cast<const char *>(mapped), static_cast<std::streamsize>(readback.byte_size));
 
-	if (kSavePreviewImages)
+	if (g_save_preview_images.load(std::memory_order_relaxed))
 	{
 		std::vector<uint8_t> bgr;
 		if (decode_depth_to_gray(static_cast<const uint8_t *>(mapped), readback.width, readback.height, readback.row_pitch, readback.tight_row_pitch, readback.near_cm, bgr))
@@ -1266,7 +1293,7 @@ bool write_color_readback(ColorReadback &readback, const std::string &postfix)
 	if (bin)
 		bin.write(static_cast<const char *>(mapped), static_cast<std::streamsize>(readback.byte_size));
 
-	if (kSavePreviewImages)
+	if (g_save_preview_images.load(std::memory_order_relaxed))
 	{
 		std::vector<uint8_t> bgr;
 		if (decode_color_to_bgr(static_cast<const uint8_t *>(mapped), readback.width, readback.height, readback.row_pitch, readback.format, bgr))
