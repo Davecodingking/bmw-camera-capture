@@ -49,6 +49,9 @@ DELETE_RAW=1       # 1=处理成功后删除该天原始采集目录省空间; 0
 SPLIT_BY_SEG=1     # 1=按CSV的segment列, 每段各出一套 rgb_depth_dataset_<日期>_seg<id>/; 0=整个采集目录出一套
 # ===== 可改：帧数不超过这个值的段判为 F8 残段，标记 skipped 跳过（不算失败）=====
 MIN_SEG_FRAMES=5   # 0=不跳过（一帧的残段也当正常段处理，会导致整天失败）
+# ===== 可改：处理完每段后，顺便导出一个合成点云(3DGS splat)方便拖进 superspl.at 查看 =====
+MAKE_PLY=1         # 1=每段额外生成 <该段目录>/splat.ply; 0=只出数据集不出点云
+PLY_STRIDE=4       # 点云采样步长：越小点越密越大(4≈中等)；预览用 4~8 即可
 # ==========================================================
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -119,7 +122,16 @@ DEDUP_ARGS=""
 
 EXPORT="$DIR/export_bmw_rgb_depth_dataset.py"
 ALIGN="$DIR/make_alignment.py"
+DTP="$DIR/dataset_to_ply.py"     # 数据集 -> 点云/3DGS splat
 ST="$DIR/state_tool.py"          # 断点记录读写（段级 + 原子写）
+
+# 处理完一段后，顺便出一个合成 splat 点云(拖进 https://superspl.at/editor 看)。失败不影响主流程。
+make_ply_for () {  # $1 = 该段的 rgb_depth_dataset 目录
+  [ "$MAKE_PLY" = "1" ] || return 0
+  echo "  [点云] 生成 $1/splat.ply ..."
+  "$PY" "$DTP" --dataset-dir "$1" --gaussian --out "$1/splat.ply" --stride "$PLY_STRIDE" --frame-step 1 \
+    || echo "  [点云] !! 生成失败(不影响数据集)，可稍后手动跑 dataset_to_ply.py"
+}
 
 shopt -s nullglob
 caps=("$DATASET"/GTACameraCapture_* "$DATASET"/BMWCameraCapture_*)
@@ -171,6 +183,7 @@ for cap in "${caps[@]}"; do
           if "$PY" "$ALIGN" --dataset-dir "$OUT" \
              && "$PY" "$ST" mark-seg "$STATE" "$tag" "$s" done "$OUT"; then
             outs="$outs seg${s}"; any_real_ok=1
+            make_ply_for "$OUT"
           else
             echo "  [$tag] !! 段 $s 对齐视频或记账失败，下次重试该段"; ok_all=0
           fi
@@ -197,7 +210,7 @@ for cap in "${caps[@]}"; do
           --out-dir "$OUT" --overwrite --min-segment-frames "$MIN_SEG_FRAMES" $DEDUP_ARGS
     rc=$?
     case "$rc" in
-      0) if "$PY" "$ALIGN" --dataset-dir "$OUT"; then outs="$OUT"; any_real_ok=1; else ok_all=0; fi ;;
+      0) if "$PY" "$ALIGN" --dataset-dir "$OUT"; then outs="$OUT"; any_real_ok=1; make_ply_for "$OUT"; else ok_all=0; fi ;;
       3) echo "  [$tag] 整个采集无可用帧(残段)，标记跳过，不删原始"
          day_status="skipped"; DELETE_THIS_RAW=0 ;;
       4) echo "  [$tag] !! 整个采集的 depth/color .bin 都不在（疑似没拷进来），保留原始不删"
